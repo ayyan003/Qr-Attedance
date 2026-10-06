@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Live Attendance QR</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<style>
+  :root{
+    --ink:#12171f; --paper:#f6f7f5; --line:#dfe3e0;
+    --accent:#2f6f4f; --accent-dim:#e4ede8; --mono:'JetBrains Mono','SFMono-Regular',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; background:var(--paper); color:var(--ink);
+    font-family:'Inter',system-ui,-apple-system,sans-serif;
+    display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  .card{
+    width:100%; max-width:520px; background:#fff; border:1px solid var(--line);
+    border-radius:18px; padding:36px; text-align:center;
+    box-shadow:0 1px 3px rgba(20,30,25,.04);
+  }
+  h1{font-size:15px; letter-spacing:.06em; text-transform:uppercase; color:#5b665f; margin:0 0 4px;}
+  h2{font-size:22px; margin:0 0 28px; font-weight:650;}
+  #qrbox{
+    width:320px; height:320px; margin:0 auto 20px; border-radius:14px; overflow:hidden;
+    background:#fff; border:1px solid var(--line); display:flex; align-items:center; justify-content:center;
+  }
+  #qrbox canvas{width:100% !important; height:100% !important}
+  .timer-track{height:6px; background:var(--accent-dim); border-radius:99px; overflow:hidden; margin-bottom:10px;}
+  .timer-fill{height:100%; background:var(--accent); width:100%; transition:width 1s linear;}
+  .meta{font-family:var(--mono); font-size:13px; color:#5b665f;}
+  .setup{max-width:440px; margin:0 auto; text-align:left;}
+  .setup label{display:block; font-size:13px; color:#5b665f; margin:14px 0 6px;}
+  .setup input{width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:9px; font-size:14px;}
+  .setup button{
+    margin-top:22px; width:100%; padding:13px; border:none; border-radius:10px;
+    background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer;
+  }
+  .setup button:hover{opacity:.92}
+  #status{margin-top:14px; font-size:13px; color:#8a6b1f;}
+  .live-badge{display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--accent); font-weight:600; margin-bottom:18px;}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--accent); animation:pulse 1.4s infinite;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
+</head>
+<body>
+
+<div class="card" id="setupCard">
+  <h1>Smart Attendance</h1>
+  <h2>Start a session</h2>
+  <div class="setup">
+    <label>Backend URL</label>
+    <input id="apiBase" value="http://localhost:8080" />
+    <label>Course name</label>
+    <input id="courseName" value="CS301 - Operating Systems" />
+    <label>Faculty name</label>
+    <input id="facultyName" value="Prof. Sharma" />
+    <label>Classroom center latitude</label>
+    <input id="lat" value="13.0827" />
+    <label>Classroom center longitude</label>
+    <input id="lng" value="80.2707" />
+    <label>Geofence radius (meters)</label>
+    <input id="radius" value="60" />
+    <button onclick="startSession()">Generate rotating QR</button>
+  </div>
+  <div id="status"></div>
+</div>
+
+<div class="card" id="qrCard" style="display:none">
+  <div class="live-badge"><span class="dot"></span>LIVE - rotates every <span id="rotSeconds">12</span>s</div>
+  <h1 id="sessionCourse">Course</h1>
+  <h2 id="sessionFaculty">Faculty</h2>
+  <div id="qrbox"></div>
+  <div class="timer-track"><div class="timer-fill" id="timerFill"></div></div>
+  <div class="meta">Session #<span id="sessionId"></span> &middot; students scan this with the attendance app</div>
+</div>
+
+<script>
+let apiBase, sessionId, rotationSeconds = 12, secondsLeft = 12, pollTimer, tickTimer;
+
+async function startSession(){
+  apiBase = document.getElementById('apiBase').value.replace(/\/$/,'');
+  const body = {
+    courseName: document.getElementById('courseName').value,
+    facultyName: document.getElementById('facultyName').value,
+    centerLat: parseFloat(document.getElementById('lat').value),
+    centerLng: parseFloat(document.getElementById('lng').value),
+    radiusMeters: parseFloat(document.getElementById('radius').value)
+  };
+  document.getElementById('status').textContent = 'Creating session...';
+  try{
+    const res = await fetch(`${apiBase}/api/qr/session`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const session = await res.json();
+    sessionId = session.id;
+    document.getElementById('sessionCourse').textContent = session.courseName;
+    document.getElementById('sessionFaculty').textContent = session.facultyName;
+    document.getElementById('sessionId').textContent = sessionId;
+    document.getElementById('setupCard').style.display = 'none';
+    document.getElementById('qrCard').style.display = 'block';
+    refreshQr();
+    pollTimer = setInterval(refreshQr, rotationSeconds * 1000);
+    tickTimer = setInterval(tick, 1000);
+  }catch(e){
+    document.getElementById('status').textContent = 'Could not reach backend: ' + e.message;
+  }
+}
+
+async function refreshQr(){
+  const res = await fetch(`${apiBase}/api/qr/${sessionId}/current`);
+  const data = await res.json();
+  rotationSeconds = data.rotatesEverySeconds;
+  secondsLeft = rotationSeconds;
+  document.getElementById('rotSeconds').textContent = rotationSeconds;
+
+  // Payload the student app scans: sessionId + signed token
+  const payload = JSON.stringify({ sessionId, token: data.token });
+  const box = document.getElementById('qrbox');
+  box.innerHTML = '';
+  const canvas = document.createElement('canvas');
+  box.appendChild(canvas);
+  QRCode.toCanvas(canvas, payload, { width: 300, margin: 1 });
+}
+
+function tick(){
+  secondsLeft = Math.max(0, secondsLeft - 1);
+  const pct = (secondsLeft / rotationSeconds) * 100;
+  document.getElementById('timerFill').style.width = pct + '%';
+}
+</script>
+</body>
+</html>

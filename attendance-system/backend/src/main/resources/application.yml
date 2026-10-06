@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: smart-attendance
+
+  # --- Default: zero-config H2 in-memory DB, perfect for running the demo ---
+  datasource:
+    url: jdbc:h2:mem:attendance;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+
+  # --- Production: switch to Postgres by uncommenting and setting env vars,
+  #     then run with --spring.profiles.active=postgres, or just replace the
+  #     block above wholesale.
+  #
+  # datasource:
+  #   url: jdbc:postgresql://localhost:5432/attendance
+  #   username: ${DB_USER:attendance}
+  #   password: ${DB_PASSWORD:changeme}
+  #   driver-class-name: org.postgresql.Driver
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.attendance: INFO

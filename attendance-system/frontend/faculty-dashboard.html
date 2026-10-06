@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Attendance Insights - Faculty</title>
+<style>
+  :root{--ink:#12171f;--paper:#f6f7f5;--line:#dfe3e0;--accent:#2f6f4f;--accent-dim:#e4ede8;--warn:#a3402c;--warn-dim:#f6e7e3;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--paper);color:var(--ink);
+    font-family:'Inter',system-ui,-apple-system,sans-serif;padding:32px;}
+  .wrap{max-width:920px;margin:0 auto;}
+  h1{font-size:15px;letter-spacing:.06em;text-transform:uppercase;color:#5b665f;margin:0 0 4px;}
+  h2{font-size:26px;margin:0 0 24px;font-weight:650;}
+  .row{display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap;}
+  input{padding:10px 12px;border:1px solid var(--line);border-radius:9px;font-size:14px;flex:1;min-width:200px;}
+  button{padding:10px 18px;border:none;border-radius:9px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer;}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:24px 0;}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;}
+  .stat .num{font-size:28px;font-weight:700;}
+  .stat .label{font-size:12px;color:#5b665f;margin-top:4px;}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden;border:1px solid var(--line);}
+  th,td{text-align:left;padding:12px 14px;font-size:13px;border-bottom:1px solid var(--line);}
+  th{background:#fafaf8;color:#5b665f;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.03em;}
+  tr:last-child td{border-bottom:none;}
+  .tag{display:inline-block;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:700;}
+  .tag.chronic{background:var(--warn-dim);color:var(--warn);}
+  .tag.risk{background:#fdf3d9;color:#8a6b1f;}
+  .tag.ok{background:var(--accent-dim);color:var(--accent);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Smart Attendance</h1>
+  <h2>Faculty insights</h2>
+  <div class="row">
+    <input id="apiBase" value="http://localhost:8080" />
+    <button onclick="loadData()">Refresh</button>
+    <button onclick="regenerate()">Regenerate weekly report</button>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <table>
+    <thead><tr><th>Student</th><th>Roll No.</th><th>Overall</th><th>Recent (14d)</th><th>Flag</th><th>Note</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<script>
+async function loadData(){
+  const apiBase = document.getElementById('apiBase').value.replace(/\/$/,'');
+  const res = await fetch(`${apiBase}/api/analytics/weekly-summary`);
+  const summary = await res.json();
+  renderStats(summary);
+  renderRows(summary.flaggedStudents.length ? summary.flaggedStudents : await allInsights(apiBase));
+}
+
+async function allInsights(apiBase){
+  const res = await fetch(`${apiBase}/api/analytics/insights`);
+  return res.json();
+}
+
+async function regenerate(){
+  const apiBase = document.getElementById('apiBase').value.replace(/\/$/,'');
+  await fetch(`${apiBase}/api/analytics/weekly-summary/regenerate`, { method: 'POST' });
+  loadData();
+}
+
+function renderStats(s){
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="num">${s.totalStudents}</div><div class="label">Total students</div></div>
+    <div class="stat"><div class="num">${s.chronicCount}</div><div class="label">Chronic absentees (&lt;75%)</div></div>
+    <div class="stat"><div class="num">${s.atRiskCount}</div><div class="label">Trending at-risk</div></div>
+    <div class="stat"><div class="num">${(s.averageAttendanceRate*100).toFixed(0)}%</div><div class="label">Avg. attendance</div></div>
+  `;
+}
+
+function renderRows(list){
+  document.getElementById('rows').innerHTML = list.map(i => `
+    <tr>
+      <td>${i.name}</td>
+      <td>${i.rollNumber}</td>
+      <td>${(i.overallAttendanceRate*100).toFixed(0)}%</td>
+      <td>${(i.recentAttendanceRate*100).toFixed(0)}%</td>
+      <td>${tag(i)}</td>
+      <td>${i.note}</td>
+    </tr>
+  `).join('');
+}
+
+function tag(i){
+  if(i.chronicAbsentee) return '<span class="tag chronic">Chronic</span>';
+  if(i.atRisk) return '<span class="tag risk">At risk</span>';
+  return '<span class="tag ok">On track</span>';
+}
+
+loadData();
+</script>
+</body>
+</html>

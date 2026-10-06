@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Enroll Face - Smart Attendance</title>
+<script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+  :root{--ink:#12171f;--paper:#f6f7f5;--line:#dfe3e0;--accent:#2f6f4f;--accent-dim:#e4ede8;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--paper);color:var(--ink);
+    font-family:'Inter',system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px;}
+  .card{width:100%;max-width:460px;background:#fff;border:1px solid var(--line);border-radius:18px;padding:32px;}
+  h1{font-size:15px;letter-spacing:.06em;text-transform:uppercase;color:#5b665f;margin:0 0 4px;}
+  h2{font-size:22px;margin:0 0 20px;font-weight:650;}
+  label{display:block;font-size:13px;color:#5b665f;margin:12px 0 6px;}
+  input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;font-size:14px;}
+  video{width:100%;border-radius:12px;margin-top:16px;background:#111;transform:scaleX(-1);}
+  canvas.overlay{position:absolute;top:0;left:0;transform:scaleX(-1);}
+  .video-wrap{position:relative;}
+  button{margin-top:16px;width:100%;padding:13px;border:none;border-radius:10px;
+    background:var(--accent);color:#fff;font-size:15px;font-weight:600;cursor:pointer;}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  #status{margin-top:12px;font-size:13px;color:#5b665f;min-height:18px;}
+  .ok{color:var(--accent)!important;font-weight:600}
+  .err{color:#a3402c!important;font-weight:600}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Smart Attendance</h1>
+  <h2>Enroll your face</h2>
+
+  <label>Backend URL</label>
+  <input id="apiBase" value="http://localhost:8080" />
+  <label>Roll number</label>
+  <input id="rollNumber" placeholder="e.g. CS21B045" />
+  <label>Full name</label>
+  <input id="name" placeholder="e.g. Ananya Rao" />
+  <label>Email</label>
+  <input id="email" placeholder="you@college.edu" />
+  <label>Password</label>
+  <input id="password" type="password" placeholder="Choose a password" />
+
+  <div class="video-wrap">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay" class="overlay"></canvas>
+  </div>
+
+  <button id="captureBtn" onclick="captureAndEnroll()" disabled>Loading face model...</button>
+  <div id="status"></div>
+</div>
+
+<script>
+let modelsReady = false;
+
+window.addEventListener('load', async () => {
+  const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+  ]);
+  modelsReady = true;
+  document.getElementById('captureBtn').disabled = false;
+  document.getElementById('captureBtn').textContent = 'Capture face & enroll';
+
+  const video = document.getElementById('video');
+  const stream = await navigator.mediaDevices.getUserMedia({ video: {} });
+  video.srcObject = stream;
+});
+
+async function captureAndEnroll(){
+  const statusEl = document.getElementById('status');
+  const video = document.getElementById('video');
+  if(!modelsReady){ statusEl.textContent = 'Model still loading...'; return; }
+
+  statusEl.textContent = 'Detecting face...';
+  const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks().withFaceDescriptor();
+
+  if(!detection){
+    statusEl.textContent = 'No face detected - make sure your face is well lit and centered.';
+    statusEl.className = 'err';
+    return;
+  }
+
+  const embedding = Array.from(detection.descriptor); // 128-d Float32 -> plain array
+
+  const apiBase = document.getElementById('apiBase').value.replace(/\/$/,'');
+  const body = {
+    rollNumber: document.getElementById('rollNumber').value,
+    name: document.getElementById('name').value,
+    email: document.getElementById('email').value,
+    password: document.getElementById('password').value,
+    faceEmbedding: embedding
+  };
+
+  statusEl.textContent = 'Saving enrollment...';
+  try{
+    const res = await fetch(`${apiBase}/api/students/enroll`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const student = await res.json();
+    statusEl.textContent = `Enrolled! Your student ID is ${student.id} - save this, you'll need it to scan attendance.`;
+    statusEl.className = 'ok';
+  }catch(e){
+    statusEl.textContent = 'Enrollment failed: ' + e.message;
+    statusEl.className = 'err';
+  }
+}
+</script>
+</body>
+</html>

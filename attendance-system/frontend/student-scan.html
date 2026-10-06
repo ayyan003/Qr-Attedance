@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Scan Attendance - Smart Attendance</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+  :root{--ink:#12171f;--paper:#f6f7f5;--line:#dfe3e0;--accent:#2f6f4f;--accent-dim:#e4ede8;--warn:#a3402c;}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--paper);color:var(--ink);
+    font-family:'Inter',system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px;}
+  .card{width:100%;max-width:460px;background:#fff;border:1px solid var(--line);border-radius:18px;padding:32px;}
+  h1{font-size:15px;letter-spacing:.06em;text-transform:uppercase;color:#5b665f;margin:0 0 4px;}
+  h2{font-size:22px;margin:0 0 18px;font-weight:650;}
+  label{display:block;font-size:13px;color:#5b665f;margin:10px 0 6px;}
+  input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;font-size:14px;}
+  .video-wrap{position:relative;margin-top:16px;border-radius:12px;overflow:hidden;background:#111;}
+  video{width:100%;display:block;transform:scaleX(-1);}
+  .stage-badge{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.03em;
+    padding:5px 10px;border-radius:99px;background:var(--accent-dim);color:var(--accent);margin-bottom:12px;}
+  .prompt{font-size:15px;font-weight:600;margin-top:14px;min-height:22px;}
+  .sub{font-size:13px;color:#5b665f;margin-top:4px;}
+  button{margin-top:16px;width:100%;padding:13px;border:none;border-radius:10px;
+    background:var(--accent);color:#fff;font-size:15px;font-weight:600;cursor:pointer;}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  #result{margin-top:16px;padding:14px;border-radius:10px;font-size:14px;display:none;}
+  #result.ok{display:block;background:var(--accent-dim);color:var(--accent);}
+  #result.err{display:block;background:#f6e7e3;color:var(--warn);}
+  .progress-row{display:flex;gap:8px;margin-top:14px;}
+  .chip{flex:1;text-align:center;font-size:11px;padding:8px 4px;border-radius:8px;background:#f1f2ef;color:#8a938c;}
+  .chip.active{background:var(--accent);color:#fff;}
+  .chip.done{background:var(--accent-dim);color:var(--accent);}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Smart Attendance</h1>
+  <h2>Scan attendance</h2>
+
+  <div id="setup">
+    <label>Backend URL</label>
+    <input id="apiBase" value="http://localhost:8080" />
+    <label>Your Student ID (from enrollment)</label>
+    <input id="studentId" placeholder="e.g. 1" />
+    <button onclick="startFlow()">Start scan</button>
+  </div>
+
+  <div id="flow" style="display:none">
+    <div class="progress-row">
+      <div class="chip" id="chip-qr">QR</div>
+      <div class="chip" id="chip-face">Face + liveness</div>
+      <div class="chip" id="chip-gps">Location</div>
+      <div class="chip" id="chip-submit">Submit</div>
+    </div>
+    <div class="video-wrap">
+      <video id="video" autoplay muted playsinline></video>
+    </div>
+    <div class="prompt" id="prompt">Point your camera at the classroom QR code</div>
+    <div class="sub" id="sub"></div>
+  </div>
+
+  <div id="result"></div>
+</div>
+
+<canvas id="hidden" style="display:none"></canvas>
+
+<script>
+let apiBase, studentId, video, hiddenCanvas, hiddenCtx, stream;
+let stage = 'qr'; // qr -> face -> gps -> submit
+let scannedSession = null; // {sessionId, token}
+let modelsReady = false;
+
+let earHistory = [];
+let yawRatios = [];
+let blinkDetected = false;
+let headTurnDetected = false;
+let bestFrontalDescriptor = null;
+let bestFrontalScore = Infinity;
+let faceLoopHandle = null;
+let livenessDeadline = 0;
+
+function setChip(id, cls){ document.getElementById(id).className = 'chip ' + cls; }
+function setPrompt(t, s=''){ document.getElementById('prompt').textContent = t; document.getElementById('sub').textContent = s; }
+
+async function startFlow(){
+  apiBase = document.getElementById('apiBase').value.replace(/\/$/,'');
+  studentId = document.getElementById('studentId').value;
+  if(!studentId){ alert('Enter your student ID'); return; }
+
+  document.getElementById('setup').style.display = 'none';
+  document.getElementById('flow').style.display = 'block';
+  setChip('chip-qr', 'active');
+
+  video = document.getElementById('video');
+  hiddenCanvas = document.getElementById('hidden');
+  hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+  video.srcObject = stream;
+  await new Promise(r => video.onloadedmetadata = r);
+
+  loadFaceModels(); // kick off in parallel, we need it soon
+  scanQrLoop();
+}
+
+async function loadFaceModels(){
+  const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+  ]);
+  modelsReady = true;
+}
+
+// ---------- Stage 1: QR scan ----------
+function scanQrLoop(){
+  if(stage !== 'qr') return;
+  if(video.readyState === video.HAVE_ENOUGH_DATA){
+    hiddenCanvas.width = video.videoWidth;
+    hiddenCanvas.height = video.videoHeight;
+    hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+    const imageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    if(code){
+      try{
+        const parsed = JSON.parse(code.data);
+        if(parsed.sessionId && parsed.token){
+          scannedSession = parsed;
+          setChip('chip-qr', 'done');
+          stage = 'face';
+          setChip('chip-face', 'active');
+          setPrompt('Hold your face steady in frame...', 'Loading face model if needed');
+          startLiveness();
+          return;
+        }
+      }catch(e){ /* not our QR, keep scanning */ }
+    }
+  }
+  requestAnimationFrame(scanQrLoop);
+}
+
+// ---------- Stage 2: Face match + liveness ----------
+function eyeAspectRatio(eye){
+  const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+  const vertical = (dist(eye[1],eye[5]) + dist(eye[2],eye[4])) / 2;
+  const horizontal = dist(eye[0],eye[3]);
+  return vertical / horizontal;
+}
+
+async function startLiveness(){
+  while(!modelsReady){ await new Promise(r => setTimeout(r, 150)); }
+  earHistory = []; yawRatios = []; blinkDetected = false; headTurnDetected = false;
+  bestFrontalDescriptor = null; bestFrontalScore = Infinity;
+  livenessDeadline = Date.now() + 15000; // 15s window to complete both challenges
+  setPrompt('Blink naturally, then slowly turn your head left/right', 'Keep your whole face in frame');
+  livenessLoop();
+}
+
+async function livenessLoop(){
+  if(stage !== 'face') return;
+
+  if(Date.now() > livenessDeadline){
+    finishLiveness(false);
+    return;
+  }
+
+  const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks().withFaceDescriptor();
+
+  if(detection){
+    const lm = detection.landmarks.positions;
+    const leftEye = lm.slice(36,42), rightEye = lm.slice(42,48);
+    const ear = (eyeAspectRatio(leftEye) + eyeAspectRatio(rightEye)) / 2;
+    earHistory.push(ear);
+    if(earHistory.length > 60) earHistory.shift();
+
+    // Blink = EAR dips below closed-threshold then recovers above open-threshold
+    if(!blinkDetected && earHistory.length > 5){
+      const min = Math.min(...earHistory.slice(-6));
+      const last = earHistory[earHistory.length-1];
+      if(min < 0.21 && last > 0.27){
+        blinkDetected = true;
+      }
+    }
+
+    // Yaw estimate via nose-to-eye-corner distance ratio
+    const nose = lm[30], leftCorner = lm[36], rightCorner = lm[45];
+    const leftDist = nose.x - leftCorner.x;
+    const rightDist = rightCorner.x - nose.x;
+    const ratio = leftDist / rightDist;
+    yawRatios.push(ratio);
+    if(yawRatios.length > 60) yawRatios.shift();
+
+    if(!headTurnDetected && yawRatios.length > 8){
+      const min = Math.min(...yawRatios), max = Math.max(...yawRatios);
+      if(max - min > 0.55){ // meaningful left<->right swing
+        headTurnDetected = true;
+      }
+    }
+
+    // Track the most frontal frame (ratio closest to 1) to use as the match embedding
+    const frontalScore = Math.abs(ratio - 1);
+    if(frontalScore < bestFrontalScore){
+      bestFrontalScore = frontalScore;
+      bestFrontalDescriptor = Array.from(detection.descriptor);
+    }
+
+    if(blinkDetected && !headTurnDetected){
+      setPrompt('Blink detected. Now slowly turn your head left, then right.');
+    } else if(!blinkDetected && headTurnDetected){
+      setPrompt('Head turn detected. Now blink naturally.');
+    }
+
+    if(blinkDetected && headTurnDetected){
+      finishLiveness(true);
+      return;
+    }
+  }
+
+  requestAnimationFrame(livenessLoop);
+}
+
+function finishLiveness(passed){
+  setChip('chip-face', passed ? 'done' : 'active');
+  if(!bestFrontalDescriptor){
+    setPrompt('Could not get a clear face capture.', 'Reload and try again in better lighting.');
+    return;
+  }
+  if(!passed){
+    setPrompt('Liveness check incomplete', 'Submitting anyway - server will flag it, or reload to retry.');
+  }
+  stage = 'gps';
+  setChip('chip-gps', 'active');
+  captureLocation();
+}
+
+// ---------- Stage 3: Geolocation ----------
+function captureLocation(){
+  setPrompt('Getting your location...', 'Make sure location services are on');
+  navigator.geolocation.getCurrentPosition(pos => {
+    setChip('chip-gps', 'done');
+    stage = 'submit';
+    setChip('chip-submit', 'active');
+    submitAttendance({
+      latitude: pos.coords.latitude,
+      longitude: pos.coords.longitude,
+      gpsAccuracyMeters: pos.coords.accuracy,
+      deviceSpeedMps: pos.coords.speed || 0,
+      fixTimestampEpochMs: pos.timestamp
+    });
+  }, err => {
+    setPrompt('Location error', err.message);
+  }, { enableHighAccuracy: true, timeout: 10000 });
+}
+
+// ---------- Stage 4: Submit ----------
+async function submitAttendance(gps){
+  setPrompt('Verifying and submitting...');
+  const body = {
+    studentId: parseInt(studentId, 10),
+    qrToken: scannedSession.token,
+    faceEmbedding: bestFrontalDescriptor,
+    blinkDetected,
+    headTurnDetected,
+    ...gps
+  };
+  try{
+    const res = await fetch(`${apiBase}/api/attendance/${scannedSession.sessionId}/submit`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    setChip('chip-submit', data.success ? 'done' : 'active');
+    const resultEl = document.getElementById('result');
+    resultEl.style.display = 'block';
+    resultEl.className = data.success ? 'ok' : 'err';
+    resultEl.textContent = `${data.message} (face match ${(data.faceMatchScore*100).toFixed(1)}%)`;
+    if(stream) stream.getTracks().forEach(t => t.stop());
+  }catch(e){
+    const resultEl = document.getElementById('result');
+    resultEl.style.display = 'block';
+    resultEl.className = 'err';
+    resultEl.textContent = 'Submit failed: ' + e.message;
+  }
+}
+</script>
+</body>
+</html>
